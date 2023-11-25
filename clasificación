@@ -1,0 +1,134 @@
+
+Map.addLayer(roi2, {}, 'roi2', true); 
+Map.centerObject(roi2, 10);
+// Load the PALSAR Global Yearly Mosaics - L-Band, 25 meter resolution
+var PALSAR_2015 = ee.Image('JAXA/ALOS/PALSAR/YEARLY/SAR/2015');
+//Load the SRTM 30 meter DEM
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+//Apply a filter to reduce speckle
+var SMOOTHING_RADIUS = 30;
+var PALSAR_2015_filtered = PALSAR_2015.select('HH',
+'HV').focal_mean(SMOOTHING_RADIUS, 'circle', 'meters');
+//Convert the images to dB:𝛾𝛾0 =10log10〈𝐷𝐷𝑁𝑁2〉+𝐶𝐶𝐹𝐹
+//CF= calibration factor. CF=-83.0 for PALSAR and CF=-84.66 for JERS
+var dB_2015_HH = PALSAR_2015_filtered.select('HH').pow(2).log10().multiply(10).add(-83.0);
+var dB_2015_HV = PALSAR_2015_filtered.select('HV').pow(2).log10().multiply(10).add(-83.0);
+//Clip the images to our area of interest
+var dB_2015_HH_roi2 = dB_2015_HH.clip(roi2);
+var dB_2015_HV_roi2 = dB_2015_HV.clip(roi2);
+var srtm_roi2 = srtm.clip(roi2);
+// Add the images and vector to "Layers" in order to visualize them
+Map.centerObject(roi2, 9);
+Map.addLayer(srtm_roi2 ,{min:-5,max:40}, 'SRTM', 0);
+Map.addLayer(dB_2015_HV_roi2,{min:-27,max:-5}, 'PALSAR HV 2015', 0);
+Map.addLayer(dB_2015_HH_roi2,{min:-15,max:-3}, 'PALSAR HH 2015', 0);
+
+
+// Function to cloud mask from the pixel QA band of Landsat 8 SR data.
+function maskL8sr(image) {
+// Bits 3 and 5 are cloud shadow and cloud, respectively.
+var cloudShadowBitMask = 1 << 3;
+var cloudsBitMask = 1 << 5;
+// Get the pixel QA band.
+var qa = image.select('pixel_qa');
+// Both flags should be set to zero, indicating clear conditions.
+var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+.and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+// Return the masked image, scaled to reflectance, without the QA bands.
+return image.updateMask(mask).divide(10000)
+.select("B[0-9]*")
+.copyProperties(image, ["system:time_start"]);
+}
+// Extract the images from the Landsat8 collection
+var collectionl8 = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR')
+.filterDate('2014-01-01', '2015-12-31')
+.filterBounds(roi2)
+.map(maskL8sr)
+.map(function(image){return image.clip(roi2)});
+//Calculate NDVI and create an image that contains all Landsat 8 bands and NDVI
+var comp = collectionl8.mean();
+var ndvi = comp.normalizedDifference(['B5', 'B4']).rename('NDVI');
+var composite = ee.Image.cat(comp,ndvi);
+// Add images to layers in order to display them
+Map.centerObject(roi2, 9);
+Map.addLayer(composite, {bands: ['B4', 'B3', 'B2'], min: 0, max: 0.2}, 'Optical');
+
+//Merge Feature Collections
+var newfc = artif1.merge(artif1).merge(agua1).merge(bosque1).merge(herba1)
+.merge(cafe1).merge(cana1).merge(mosaic1).merge(ct1).merge(pasto1);
+//Define the SAR 2010 bands to train your data
+
+//Define the SAR 2015 bands to train your data
+var final5 = ee.Image.cat(dB_2015_HH_roi2,dB_2015_HV_roi2);
+var bands5 = ['HH','HV'];
+var training5 = final5.select(bands5).sampleRegions({
+collection: newfc,
+properties: ['landcover'],
+scale: 30 });
+//Train the classifier
+var classifier5 = ee.Classifier.smileRandomForest(10).train({
+features: training5,
+classProperty: 'landcover',
+inputProperties: bands5
+});
+//Run the Classification
+var classified5 = final5.select(bands5).classify(classifier5);
+//Display the Classification
+Map.addLayer(classified5,
+{min: 1, max: 9, palette: ['1667fa', 'c9270d', 'cf7b68', 'ee9a1c', '146d0e', '04bd23','37fe05',"e6fb7b","a6cee3"]},
+'SAR5 Classification');
+
+//Define the Landsat bands to train your data
+var bandsl8 = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'NDVI' ];
+//var bandsl8 = ['NDVI' ];
+var trainingl8 = composite.select(bandsl8).sampleRegions({
+collection: newfc,properties: ['landcover'],scale: 30});
+//Train the classifier
+var classifierl8 =
+ee.Classifier.smileRandomForest(10).train({
+features: trainingl8,
+classProperty: 'landcover',
+inputProperties: bandsl8
+});
+//Run the Classification
+var classifiedl8 = composite.select(bandsl8).classify(classifierl8);
+//Display the Classification
+Map.addLayer(classifiedl8,
+{min: 1, max: 9, palette: ['1667fa', 'c9270d', 'cf7b68', 'ee9a1c', '146d0e', '04bd23', '37fe05',"e6fb7b","a6cee3"]},
+'Optical Classification');
+//Define both optical and SAR5 to train your data
+var opt_sar5 = ee.Image.cat(composite, dB_2015_HH_roi2,dB_2015_HV_roi2);
+var bands_opt_sar5 = ['HH','HV','B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'NDVI'];
+var training_opt_sar5 = opt_sar5.select(bands_opt_sar5).sampleRegions({
+collection: newfc,
+properties: ['landcover'],
+scale: 30 });
+//Train the classifier
+var classifier_opt_sar5 =
+ee.Classifier.smileRandomForest(10).train({
+features: training_opt_sar5,
+classProperty: 'landcover',
+inputProperties: bands_opt_sar5
+});
+//Run the Classification
+var classifiedboth5 = opt_sar5.select(bands_opt_sar5).classify(classifier_opt_sar5);
+//Display the Classification
+Map.addLayer(classifiedboth5,
+{min: 1, max: 9, palette: ['1667fa', 'c9270d', 'cf7b68', 'ee9a1c', '146d0e', '04bd23','37fe05',"e6fb7b","a6cee3"]},
+'Optical/SAR5 Classification');
+// Create a confusion matrix representing resubstitution accuracy.
+print('RF-Opt/SAR error matrix: ', classifier_opt_sar5.confusionMatrix());
+print('RF-Opt/SAR accuracy: ', classifier_opt_sar5.confusionMatrix().accuracy());
+
+Export.image.toDrive({
+  image: classifiedboth5,
+  description: 'clasna15',
+  scale: 30,
+  region: roi2,
+  folder: "GEE_folder",
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  formatOptions: { cloudOptimized: true
+  }
+});
